@@ -1,3 +1,4 @@
+GNU nano 8.1                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              redeploy.sh                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       
 #!/bin/bash
 set -e
 
@@ -53,53 +54,47 @@ function reinstall_and_deploy() {
     echo "=== Removing Existing Govex Project ==="
     if [ -d "/root/monorepo" ]; then
         echo "Stopping PM2 processes..."
-        pm2 stop frontend || echo "Frontend process not running."
-        pm2 stop backend || echo "Backend process not running."
-        pm2 delete frontend || echo "No frontend process to delete."
-        pm2 delete backend || echo "No backend process to delete."
+        pm2 stop frontend 2>/dev/null || echo "Frontend process not running."
+        pm2 stop backend 2>/dev/null || echo "Backend process not running."
+        pm2 delete frontend 2>/dev/null || echo "No frontend process to delete."
+        pm2 delete backend 2>/dev/null || echo "No backend process to delete."
         pm2 save
         echo "Removing project directory..."
-        rm -rf "/root/monorepo"
+        sudo rm -rf "/root/monorepo" || { echo "Failed to remove project directory."; exit 1; }
     else
         echo "No existing project directory found. Skipping removal."
     fi
 
     echo "=== Cloning Govex Repository ==="
-    git clone https://github.com/govex-dao/monorepo.git /root/monorepo
+    git clone git@github.com:govex-dao/monorepo.git /root/monorepo || { echo "Failed to clone repository."; exit 1; }
 
     echo "=== Deploying Backend ==="
-    cd "$PROJECT_DIR/api"
-    pnpm install
-    pnpm db:setup:dev
-    pm2 start "pnpm dev" --name backend
-    pm2 save
+    BACKEND_DIR="/root/monorepo/backend"
+    if [ -d "$BACKEND_DIR" ]; then
+        cd "$BACKEND_DIR" || { echo "Failed to enter backend directory."; exit 1; }
+        pnpm install || { echo "Failed to install backend dependencies."; exit 1; }
+        echo "Enforcing WAL mode on SQLite database..."
+        sqlite3 dev.db "PRAGMA journal_mode=WAL;" || { echo "Failed to enable WAL mode."; exit 1; }
+        pnpm fresh:db
+        pm2 start "pnpm dev:prod" --name backend || { echo "Failed to start backend."; exit 1; }
+        pm2 save || { echo "Failed to save PM2 backend process."; exit 1; }
+    else
+        echo "Backend directory not found. Skipping backend deployment."
+    fi
 
     echo "=== Deploying Frontend ==="
-    cd "$PROJECT_DIR/frontend"
-    pnpm install --ignore-workspace
-    pm2 start "pnpm dev --host 127.0.0.1" --name frontend
-    pm2 save
+    FRONTEND_DIR="/root/monorepo/frontend"
+    if [ -d "$FRONTEND_DIR" ]; then
+        cd "$FRONTEND_DIR" || { echo "Failed to enter frontend directory."; exit 1; }
+        pnpm install --ignore-workspace || { echo "Failed to install frontend dependencies."; exit 1; }
+        pnpm vite build
+        pm2 start "serve -s dist -l 5173" --name frontend
+        pm2 save || { echo "Failed to save PM2 frontend process."; exit 1; }
+    else
+        echo "Frontend directory not found. Skipping frontend deployment."
+    fi
 
     echo "=== Govex Reinstallation and Deployment Complete ==="
-}
-
-function deploy_frontend() {
-    echo "=== Deploying Frontend ==="
-    cd "$PROJECT_DIR/frontend"
-    git pull origin main # Pull the latest frontend code (adjust branch as needed)
-    pnpm install --ignore-workspace
-    pm2 restart frontend || pm2 start "pnpm dev --host 127.0.0.1" --name frontend
-    pm2 save
-}
-
-function deploy_backend() {
-    echo "=== Deploying Backend ==="
-    cd "$PROJECT_DIR/api"
-    git pull origin main # Pull the latest backend code (adjust branch as needed)
-    pnpm install
-    pnpm db:setup:dev
-    pm2 restart backend || pm2 start "pnpm dev" --name backend
-    pm2 save
 }
 
 function setup_nginx_and_ssl() {
@@ -146,41 +141,22 @@ EOF
 # Main Script Logic
 function main() {
     case $1 in
-    system)
-        update_system
-        ;;
-    swap)
-        setup_swap
-        ;;
-    dependencies)
-        install_dependencies
-        install_node_and_pnpm
-        ;;
     deploy)
         reinstall_and_deploy
-        ;;
-    frontend)
-        deploy_frontend
-        ;;
-    backend)
-        deploy_backend
-        ;;
-    nginx)
-        setup_nginx_and_ssl
         ;;
     all)
         update_system
         setup_swap
         install_dependencies
         install_node_and_pnpm
-        deploy_backend
-        deploy_frontend
+        reinstall_and_deploy    
         setup_nginx_and_ssl
         ;;
     *)
-        echo "Usage: $0 {system|swap|dependencies|frontend|backend|nginx|all}"
+        echo "Usage: $0 {deploy|all}"
         ;;
     esac
 }
 
 main "$@"
+
